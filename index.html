@@ -52,6 +52,7 @@
     <button class="tab" data-mode="items">Item to villager</button>
     <button class="tab" data-mode="roster">Island roster</button>
     <button class="tab" data-mode="assignments">Assignments</button>
+    <button class="tab" data-mode="history">History</button>
     <button class="tab" data-mode="backup">Backup</button>
   </div>
   <div class="layout">
@@ -64,6 +65,7 @@
         <div class="suggest-wrap"><label for="itemSearch">Find the best villagers for an item</label><input id="itemSearch" placeholder="Search item name"><div id="itemSuggest" class="suggest"></div></div>
         <div><label for="variantSelect">Choose variation</label><select id="variantSelect"><option value="">Show all variations</option></select></div>
         <label class="toggle"><input type="checkbox" id="allVillagersToggle"> Match against <strong>all&nbsp;417</strong> villagers (exploration)</label>
+        <label class="toggle"><input type="checkbox" id="showAssignedToggle"> Show villagers already assigned this cycle</label>
       </div>
       <div id="rosterControls" class="controls" style="display:none">
         <div class="suggest-wrap"><label for="rosterSearch">Search all 417 villagers to add</label><input id="rosterSearch" placeholder="Type any villager name"><div id="rosterSuggest" class="suggest"></div></div>
@@ -103,7 +105,7 @@
 const data=window.ACNH_DATA;
 const CAT=window.ACNH_CATALOG;                 // {active:[names], photoDefaults:{}, catalog:[...]}
 const MAX_ROSTER=10;
-const STATE_VERSION=1;
+const STATE_VERSION=2;
 
 const $=s=>document.querySelector(s);
 const $$=s=>[...document.querySelectorAll(s)];
@@ -111,7 +113,7 @@ const villagerSearch=$('#villagerSearch'),giftSearch=$('#giftSearch'),itemSearch
 const villagerSuggest=$('#villagerSuggest'),giftSuggest=$('#giftSuggest'),itemSuggest=$('#itemSuggest'),rosterSuggest=$('#rosterSuggest');
 const villagerGrid=$('#villagerGrid'),detail=$('#detail'),variantSelect=$('#variantSelect');
 const villagerControls=$('#villagerControls'),itemControls=$('#itemControls'),rosterControls=$('#rosterControls'),tabs=$$('.tab');
-const allVillagersToggle=$('#allVillagersToggle'),statusbar=$('#statusbar');
+const allVillagersToggle=$('#allVillagersToggle'),showAssignedToggle=$('#showAssignedToggle'),statusbar=$('#statusbar');
 
 /* ---- category maps ---------------------------------------------------- */
 const wearableSheets=new Set(['Tops','Dress-Up','Headwear','Accessories','Bottoms','Socks','Shoes','Bags','Umbrellas','Clothing Other']);
@@ -274,10 +276,11 @@ function rebuildActive(){
 const state={
   mode:'villagers', vq:'', gq:'', iq:'', rq:'',
   selected:'', selectedItemName:'', selectedVariantKey:'',
-  allVillagers:false,
+  allVillagers:false, showAssigned:false,
   active:[],           // list of active villager names (<=10)
   photo:{},            // name -> bool (retained across leave/rejoin in session)
-  assignments:[]       // [{villager, gift}]
+  assignments:[],      // current cycle: [{villager, gift, gifted, giftedAt}]
+  history:[]           // permanent log of gifted items: [{id, villager, gift, giftedAt}], survives cycle resets
 };
 
 /* ---- defaults from embedded data ------------------------------------- */
@@ -300,7 +303,8 @@ function serializeState(){
     v:STATE_VERSION,
     a:state.active.slice(0,MAX_ROSTER),
     p:state.active.filter(n=>state.photo[n]),                 // only true flags, only active
-    g:state.assignments.map(x=>[x.villager,x.gift||'']).slice(0,200),
+    g:state.assignments.map(x=>[x.villager,x.gift||'',x.gifted?1:0,x.giftedAt||0]).slice(0,200),
+    h:state.history.map(x=>[x.id,x.villager,x.gift||'',x.giftedAt||0]).slice(-300),
     m:state.mode
   };
   return payload;
@@ -331,22 +335,35 @@ function validatePayload(obj){
   const photo={};
   const pArr=Array.isArray(obj.p)?obj.p:[];
   pArr.forEach(n=>{ if(typeof n==='string' && validNames.has(n)) photo[n]=true; });
-  // assignments: array of [villager,gift] with length caps; gift as string
+  // assignments: array of [villager,gift,gifted,giftedAt] with length caps; gift as string
   const assignments=[];
   const gArr=Array.isArray(obj.g)?obj.g:[];
   gArr.slice(0,200).forEach(pair=>{
     if(!Array.isArray(pair)) return;
     const vn=typeof pair[0]==='string'?pair[0].slice(0,60):'';
     const gf=typeof pair[1]==='string'?pair[1].slice(0,120):'';
-    if(vn) assignments.push({villager:vn,gift:gf});
+    const gifted=!!pair[2];
+    const giftedAt=Number(pair[3])||0;
+    if(vn) assignments.push({villager:vn,gift:gf,gifted,giftedAt:gifted?giftedAt:0});
   });
-  const mode=['villagers','items','roster','assignments','backup'].includes(obj.m)?obj.m:'villagers';
-  return {active,photo,assignments,mode,warnings};
+  // history: permanent gifted-item log [id,villager,gift,giftedAt]
+  const history=[];
+  const hArr=Array.isArray(obj.h)?obj.h:[];
+  hArr.slice(-300).forEach(row=>{
+    if(!Array.isArray(row)) return;
+    const id=Number(row[0])||0;
+    const vn=typeof row[1]==='string'?row[1].slice(0,60):'';
+    const gf=typeof row[2]==='string'?row[2].slice(0,120):'';
+    const at=Number(row[3])||0;
+    if(vn && at) history.push({id,villager:vn,gift:gf,giftedAt:at});
+  });
+  const mode=['villagers','items','roster','assignments','history','backup'].includes(obj.m)?obj.m:'villagers';
+  return {active,photo,assignments,history,mode,warnings};
 }
 let loadWarning='';
 function loadFromUrl(){
   const d=defaultState();
-  state.active=d.active; state.photo=d.photo; state.assignments=[]; state.mode='villagers';
+  state.active=d.active; state.photo=d.photo; state.assignments=[]; state.history=[]; state.mode='villagers';
   const h=location.hash.replace(/^#/,'');
   if(!h.startsWith('s=')) return;             // no saved state -> defaults (nine)
   try{
@@ -364,11 +381,12 @@ function loadFromUrl(){
     vp.active.forEach(n=>{ photo[n]=!!vp.photo[n]; });
     state.photo=photo;
     state.assignments=vp.assignments;
+    state.history=vp.history;
     state.mode=vp.mode;
     if(vp.warnings.length) loadWarning=vp.warnings.join(' ');
   }catch(e){
     loadWarning='Saved state in the link could not be read, so the default island roster was loaded. Your data was not changed.';
-    const d2=defaultState(); state.active=d2.active; state.photo=d2.photo; state.assignments=[]; state.mode='villagers';
+    const d2=defaultState(); state.active=d2.active; state.photo=d2.photo; state.assignments=[]; state.history=[]; state.mode='villagers';
   }
 }
 
@@ -432,6 +450,36 @@ function replaceVillager(oldName,newName){
 }
 function togglePhoto(name){ mutate(()=>{ state.photo[name]=!state.photo[name]; }); }
 
+/* ---- assignment / gifted / cycle mutations ----------------------------
+   One assignment per villager per cycle: assigning a new gift to a
+   villager who already has one replaces it. "Gifted" toggles a permanent
+   history entry; un-marking removes that specific history entry (matched
+   by id) without touching anything else in the log. A cycle reset clears
+   the working assignment list only — history is never touched by it. */
+const assignedNamesSet=()=>new Set(state.assignments.map(a=>a.villager));
+function assignGiftToVillager(villagerName,giftText){
+  mutate(()=>{
+    state.assignments=state.assignments.filter(a=>a.villager!==villagerName);
+    state.assignments.push({villager:villagerName,gift:giftText||'',gifted:false,giftedAt:0});
+    state.mode='assignments';
+  });
+}
+function toggleGifted(index){
+  mutate(()=>{
+    const a=state.assignments[index]; if(!a) return;
+    if(a.gifted){
+      state.history=state.history.filter(h=>h.id!==a.giftedAt);
+      a.gifted=false; a.giftedAt=0;
+    }else{
+      const id=Date.now();
+      a.gifted=true; a.giftedAt=id;
+      state.history.push({id,villager:a.villager,gift:a.gift||'',giftedAt:id});
+    }
+  });
+}
+function resetCycle(){ mutate(()=>{ state.assignments=[]; }); }
+function clearHistory(){ mutate(()=>{ state.history=[]; }); }
+
 /* =====================================================================
    RENDER
    ===================================================================== */
@@ -439,9 +487,10 @@ function renderStatusbar(){
   const n=state.active.length;
   const full=n>=MAX_ROSTER;
   const photoCount=state.active.filter(n=>state.photo[n]).length;
+  const giftedCount=state.assignments.filter(a=>a.gifted).length;
   statusbar.innerHTML=`<span>Island roster: <strong class="${full?'count-full':'count-ok'}">${n}/${MAX_ROSTER}</strong></span>`+
     `<span>Photos collected: <strong>${photoCount}/${n}</strong></span>`+
-    `<span>Assignments: <strong>${state.assignments.length}</strong></span>`+
+    `<span>This cycle: <strong>${giftedCount}/${state.assignments.length}</strong> gifted</span>`+
     `<span class="warn-txt">💾 Changes are saved in this page's URL and survive refresh. Bookmark it or export a backup to keep them.</span>`+
     (loadWarning?`<span class="warn-txt">⚠ ${esc(loadWarning)}</span>`:'');
 }
@@ -450,10 +499,15 @@ function villagerRows(v){
   if(state.gq) rows=rows.filter(g=>matches(giftLabel(g),state.gq)||matches(g.name,state.gq)||matches(g.variation,state.gq)||matches(g.sourceSheet,state.gq));
   return rows;
 }
+function cycleBadge(name){
+  const a=state.assignments.find(x=>x.villager===name);
+  if(!a) return '';
+  return a.gifted?`<span class="chip home">✔ Gifted</span>`:`<span class="chip">🎁 Assigned</span>`;
+}
 function renderGrid(){
   if(state.mode==='roster'){ renderRosterGrid(); return; }
   const list=[...ACTIVE].filter(v=>matches(v.name,state.vq)).sort((a,b)=>a.name.localeCompare(b.name));
-  villagerGrid.innerHTML=list.map(v=>`<button class="card ${state.selected===v.name?'selected':''}" data-name="${esc(v.name)}"><div class="title">${esc(v.name)}</div><div class="sub">${esc(v.species)} · ${esc(v.personality)} · ${esc(v.gender)}</div><div class="chips">${colorChip(v.color1)}${colorChip(v.color2)}${colorChip(v.style1)}${colorChip(v.style2)}</div><div class="sub">${v.hasPhoto?'Photo collected — all values shown':'Needs photo — only >750 gifts shown'}</div><div class="miniwrap">${(v.topGifts||[]).slice(0,3).map(g=>`<div class='mini'>${esc(giftLabel(g))} · ${esc(g.sourceSheet)}</div>`).join('')}</div></button>`).join('')||'<div class="sub">No active villagers. Add some in the Island roster tab.</div>';
+  villagerGrid.innerHTML=list.map(v=>`<button class="card ${state.selected===v.name?'selected':''}" data-name="${esc(v.name)}"><div class="title">${esc(v.name)} ${cycleBadge(v.name)}</div><div class="sub">${esc(v.species)} · ${esc(v.personality)} · ${esc(v.gender)}</div><div class="chips">${colorChip(v.color1)}${colorChip(v.color2)}${colorChip(v.style1)}${colorChip(v.style2)}</div><div class="sub">${v.hasPhoto?'Photo collected — all values shown':'Needs photo — only >750 gifts shown'}</div><div class="miniwrap">${(v.topGifts||[]).slice(0,3).map(g=>`<div class='mini'>${esc(giftLabel(g))} · ${esc(g.sourceSheet)}</div>`).join('')}</div></button>`).join('')||'<div class="sub">No active villagers. Add some in the Island roster tab.</div>';
   villagerGrid.querySelectorAll('[data-name]').forEach(b=>b.onclick=()=>{state.selected=b.dataset.name;persist();render();});
 }
 function renderRosterGrid(){
@@ -470,10 +524,12 @@ function renderVillagerDetail(){
   const furnCount=rows.filter(g=>furnitureSheets.has(g.sourceSheet)).length;
   const clothCount=rows.filter(g=>isClothingGift(g)).length;
   const homeCount=rows.filter(g=>g.inHome).length;
-  detail.innerHTML=`<div class="title" style="font-size:1.25rem">${esc(v.name)}</div><div class="sub">${esc(v.species)} · ${esc(v.personality)} · Hobby: ${esc(v.hobby)} · Favorite colors: ${esc(v.color1||'—')}${v.color2?' / '+esc(v.color2):''} · Favorite styles: ${esc(v.style1||'—')}${v.style2?' / '+esc(v.style2):''}</div><div class="sub" style="margin-top:6px">${v.hasPhoto?'✔ Photo collected — items of any value are recommended.':'📷 Photo not yet obtained — only gifts over 750 bells are shown (high-value gifts trigger the return needed to grind the photo).'}</div><div class="kpis"><div class="kpi"><div class="sub">Photo status</div><div class="num">${v.hasPhoto?'Done':'Needed'}</div></div><div class="kpi"><div class="sub">Furniture picks</div><div class="num">${furnCount}</div></div><div class="kpi"><div class="sub">Clothing picks</div><div class="num">${clothCount}</div></div><div class="kpi"><div class="sub">In their home</div><div class="num">${homeCount}</div></div><div class="kpi"><div class="sub">Over 750 bells</div><div class="num">${rows.filter(g=>num(g.sell)>PHOTO).length}</div></div></div><div class="actionrow" style="margin-top:14px"><button class="smallbtn" id="togglePhoto">${v.hasPhoto?'Mark photo as NOT obtained':'Mark photo as obtained'}</button><button class="smallbtn" id="quickAssign">Add assignment</button></div><div class="list">${rows.slice(0,120).map(g=>`<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(giftLabel(g))}${g.inHome?' <span class="chip home">Already in their home</span>':''}</div><div class="sub">${esc(g.sourceSheet)} · Sells for ${num(g.sell).toLocaleString()} bells · ${valueStatus(g)} · ${giftTypeLabel(g)}</div></div><span class="badge ${tierClass(g.tier)}">${g.tier}</span></div><div class="chips">${colorChip(g.color1)}${colorChip(g.color2)}${g._styled?colorChip(g.style1)+colorChip(g.style2):(g._styleInferred?g._inferredStyles.map(s=>colorChip(s)).join(''):'')}${colorChip(g.theme1&&g.theme1!=='None'?g.theme1:'')}${colorChip(g.theme2&&g.theme2!=='None'?g.theme2:'')}${g.villagerGender&&g.villagerGender!=='Free'?`<span class='chip'>${esc(g.villagerGender)}</span>`:''}</div><div class="why">Why: ${esc(reasonLine(g))||'Eligible gift'}</div><div class="sub">${dimLine(g)}</div><div class="actionrow"><button class="smallbtn" data-assign-v="${esc(v.name)}" data-assign-g="${encodeURIComponent(giftLabel(g))}">Assign</button></div></div>`).join('')||'<div class="rowbox"><div class="sub">No eligible gifts for the current filters.</div></div>'}</div>`;
+  const current=state.assignments.find(a=>a.villager===v.name);
+  const cycleNote=current?(current.gifted?`<div class="inline-ok">✔ Already gifted this cycle: ${esc(current.gift)||'(no item noted)'}</div>`:`<div class="inline-ok">🎁 Assigned this cycle: ${esc(current.gift)||'(no item noted)'} — pick another gift below to replace it.</div>`):'';
+  detail.innerHTML=`<div class="title" style="font-size:1.25rem">${esc(v.name)}</div><div class="sub">${esc(v.species)} · ${esc(v.personality)} · Hobby: ${esc(v.hobby)} · Favorite colors: ${esc(v.color1||'—')}${v.color2?' / '+esc(v.color2):''} · Favorite styles: ${esc(v.style1||'—')}${v.style2?' / '+esc(v.style2):''}</div><div class="sub" style="margin-top:6px">${v.hasPhoto?'✔ Photo collected — items of any value are recommended.':'📷 Photo not yet obtained — only gifts over 750 bells are shown (high-value gifts trigger the return needed to grind the photo).'}</div>${cycleNote}<div class="kpis"><div class="kpi"><div class="sub">Photo status</div><div class="num">${v.hasPhoto?'Done':'Needed'}</div></div><div class="kpi"><div class="sub">Furniture picks</div><div class="num">${furnCount}</div></div><div class="kpi"><div class="sub">Clothing picks</div><div class="num">${clothCount}</div></div><div class="kpi"><div class="sub">In their home</div><div class="num">${homeCount}</div></div><div class="kpi"><div class="sub">Over 750 bells</div><div class="num">${rows.filter(g=>num(g.sell)>PHOTO).length}</div></div></div><div class="actionrow" style="margin-top:14px"><button class="smallbtn" id="togglePhoto">${v.hasPhoto?'Mark photo as NOT obtained':'Mark photo as obtained'}</button><button class="smallbtn" id="quickAssign">Add blank assignment</button></div><div class="list">${rows.slice(0,120).map(g=>`<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(giftLabel(g))}${g.inHome?' <span class="chip home">Already in their home</span>':''}</div><div class="sub">${esc(g.sourceSheet)} · Sells for ${num(g.sell).toLocaleString()} bells · ${valueStatus(g)} · ${giftTypeLabel(g)}</div></div><span class="badge ${tierClass(g.tier)}">${g.tier}</span></div><div class="chips">${colorChip(g.color1)}${colorChip(g.color2)}${g._styled?colorChip(g.style1)+colorChip(g.style2):(g._styleInferred?g._inferredStyles.map(s=>colorChip(s)).join(''):'')}${colorChip(g.theme1&&g.theme1!=='None'?g.theme1:'')}${colorChip(g.theme2&&g.theme2!=='None'?g.theme2:'')}${g.villagerGender&&g.villagerGender!=='Free'?`<span class='chip'>${esc(g.villagerGender)}</span>`:''}</div><div class="why">Why: ${esc(reasonLine(g))||'Eligible gift'}</div><div class="sub">${dimLine(g)}</div><div class="actionrow"><button class="smallbtn" data-assign-v="${esc(v.name)}" data-assign-g="${encodeURIComponent(giftLabel(g))}">${current?'Assign (replaces current)':'Assign'}</button></div></div>`).join('')||'<div class="rowbox"><div class="sub">No eligible gifts for the current filters.</div></div>'}</div>`;
   $('#togglePhoto').onclick=()=>togglePhoto(v.name);
-  $('#quickAssign').onclick=()=>{mutate(()=>{state.assignments.push({villager:v.name,gift:''});state.mode='assignments';});};
-  detail.querySelectorAll('[data-assign-v]').forEach(b=>b.onclick=()=>{mutate(()=>{state.assignments.push({villager:b.dataset.assignV,gift:decodeURIComponent(b.dataset.assignG)});state.mode='assignments';});});
+  $('#quickAssign').onclick=()=>assignGiftToVillager(v.name,'');
+  detail.querySelectorAll('[data-assign-v]').forEach(b=>b.onclick=()=>assignGiftToVillager(b.dataset.assignV,decodeURIComponent(b.dataset.assignG)));
 }
 function uniqueItemNames(q=''){return [...new Set(allGifts.filter(g=>matches(g.name,q)||matches(giftLabel(g),q)).map(g=>g.name))].sort((a,b)=>a.localeCompare(b));}
 function variantsForName(name){return allGifts.filter(g=>g.name===name).sort((a,b)=>(a.variation||'').localeCompare(b.variation||'')||a.sourceSheet.localeCompare(b.sourceSheet));}
@@ -485,8 +541,10 @@ function populateVariantSelect(){
 }
 function itemPool(){
   // default: active roster only. optional: all 417 (exploration).
-  if(state.allVillagers) return CATALOG_NAMES.map(makeVillager).filter(Boolean);
-  return ACTIVE;
+  const base=state.allVillagers?CATALOG_NAMES.map(makeVillager).filter(Boolean):ACTIVE;
+  if(state.showAssigned) return base;
+  const assigned=assignedNamesSet();
+  return base.filter(v=>!assigned.has(v.name));
 }
 function renderItemDetail(){
   const chosen=state.selectedItemName || uniqueItemNames(state.iq)[0];
@@ -494,8 +552,13 @@ function renderItemDetail(){
   state.selectedItemName=chosen; populateVariantSelect();
   let items=variantsForName(chosen); if(state.selectedVariantKey) items=items.filter(g=>variantKey(g)===state.selectedVariantKey);
   const pool=itemPool();
-  const poolNote=state.allVillagers?`Matching against <strong>all 417</strong> villagers (exploration mode).`:`Matching against your <strong>${pool.length}</strong> active island villager${pool.length===1?'':'s'}.`;
-  detail.innerHTML=`<div class="title" style="font-size:1.25rem">${esc(chosen)}</div><div class="sub">${items.length} variation${items.length===1?'':'s'} shown. ${poolNote} Villagers still needing a photo only appear for gifts over 750 bells.</div><div class="list">${items.map(item=>{const best=pool.map(v=>{const s=scoreVillagerForGift(v,item);return s?{villager:v,...s}:null;}).filter(Boolean).sort((a,b)=>b.score-a.score||b.colorMatches-a.colorMatches||b.styleMatches-a.styleMatches||a.villager.name.localeCompare(b.villager.name));const excluded=pool.filter(v=>!v.hasPhoto && num(item.sell)<=PHOTO).map(v=>v.name);return `<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(giftLabel(item))}</div><div class="sub">Sells for ${num(item.sell).toLocaleString()} bells · ${valueStatus(item)} · Colors: ${esc(item.color1||'—')} / ${esc(item.color2||'—')} · Source: ${esc(item.sourceSheet)}</div></div><span class="badge ${item.villagerEquippable?'good':'ok'}">${giftTypeLabel(item)}</span></div><div class="chips">${styledSheets.has(item.sourceSheet)?colorChip(item.style1)+colorChip(item.style2):(item._styleInferred?item._inferredStyles.map(s=>colorChip(s)).join(''):'')}${colorChip(item.theme1&&item.theme1!=='None'?item.theme1:'')}${colorChip(item.theme2&&item.theme2!=='None'?item.theme2:'')}${item.villagerGender&&item.villagerGender!=='Free'?`<span class='chip'>${esc(item.villagerGender)}</span>`:''}</div><div class="list">${best.slice(0,10).map(v=>`<div class='mini'><strong>${esc(v.villager.name)}</strong> · ${v.tier} tier · score ${v.score} · colour ${(+v.colorPts).toFixed(1)}/3 · ${v.styleApplicable?'style '+(+v.stylePts).toFixed(1)+'/3'+(v.styleInferred?' (inferred)':''):'style N/A'} · value ${(+v.valuePts).toFixed(1)}/3${v.inHome?' · Already in their home (+'+v.homePts+')':''}</div>`).join('')||'<div class="mini">No eligible villagers for this variation.</div>'}${excluded.length?`<div class='mini' style='opacity:.7'>Excluded (still need photo, item \u2264750): ${excluded.map(esc).join(', ')}</div>`:''}</div></div>`;}).join('')}</div>`;
+  const assignedSet=assignedNamesSet();
+  const fullBase=state.allVillagers?CATALOG_NAMES.map(makeVillager).filter(Boolean):ACTIVE;
+  const hiddenAssigned=state.showAssigned?[]:fullBase.filter(v=>assignedSet.has(v.name)).map(v=>v.name);
+  const poolNote=(state.allVillagers?`Matching against <strong>all 417</strong> villagers (exploration mode).`:`Matching against your <strong>${pool.length}</strong> active island villager${pool.length===1?'':'s'}.`)+
+    (hiddenAssigned.length?` <strong>${hiddenAssigned.length}</strong> hidden as already assigned this cycle (check "Show villagers already assigned" to reveal).`:'');
+  detail.innerHTML=`<div class="title" style="font-size:1.25rem">${esc(chosen)}</div><div class="sub">${items.length} variation${items.length===1?'':'s'} shown. ${poolNote} Villagers still needing a photo only appear for gifts over 750 bells.</div><div class="list">${items.map(item=>{const best=pool.map(v=>{const s=scoreVillagerForGift(v,item);return s?{villager:v,...s}:null;}).filter(Boolean).sort((a,b)=>b.score-a.score||b.colorMatches-a.colorMatches||b.styleMatches-a.styleMatches||a.villager.name.localeCompare(b.villager.name));const excluded=pool.filter(v=>!v.hasPhoto && num(item.sell)<=PHOTO).map(v=>v.name);return `<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(giftLabel(item))}</div><div class="sub">Sells for ${num(item.sell).toLocaleString()} bells · ${valueStatus(item)} · Colors: ${esc(item.color1||'—')} / ${esc(item.color2||'—')} · Source: ${esc(item.sourceSheet)}</div></div><span class="badge ${item.villagerEquippable?'good':'ok'}">${giftTypeLabel(item)}</span></div><div class="chips">${styledSheets.has(item.sourceSheet)?colorChip(item.style1)+colorChip(item.style2):(item._styleInferred?item._inferredStyles.map(s=>colorChip(s)).join(''):'')}${colorChip(item.theme1&&item.theme1!=='None'?item.theme1:'')}${colorChip(item.theme2&&item.theme2!=='None'?item.theme2:'')}${item.villagerGender&&item.villagerGender!=='Free'?`<span class='chip'>${esc(item.villagerGender)}</span>`:''}</div><div class="list">${best.slice(0,10).map(v=>{const isRosterMember=ACTIVE.some(x=>x.name===v.villager.name);const already=assignedSet.has(v.villager.name);const assignBtn=isRosterMember?`<button class="smallbtn" data-item-assign-v="${esc(v.villager.name)}" data-item-assign-g="${encodeURIComponent(giftLabel(item))}">${already?'Reassign':'Assign'}</button>`:'';return `<div class='mini' style='display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap'><span><strong>${esc(v.villager.name)}</strong> · ${v.tier} tier · score ${v.score} · colour ${(+v.colorPts).toFixed(1)}/3 · ${v.styleApplicable?'style '+(+v.stylePts).toFixed(1)+'/3'+(v.styleInferred?' (inferred)':''):'style N/A'} · value ${(+v.valuePts).toFixed(1)}/3${v.inHome?' · Already in their home (+'+v.homePts+')':''}${already?' · '+cycleBadge(v.villager.name):''}</span>${assignBtn}</div>`;}).join('')||'<div class="mini">No eligible villagers for this variation.</div>'}${excluded.length?`<div class='mini' style='opacity:.7'>Excluded (still need photo, item \u2264750): ${excluded.map(esc).join(', ')}</div>`:''}</div></div>`;}).join('')}</div>`;
+  detail.querySelectorAll('[data-item-assign-v]').forEach(b=>b.onclick=()=>assignGiftToVillager(b.dataset.itemAssignV,decodeURIComponent(b.dataset.itemAssignG)));
 }
 function renderRosterDetail(){
   const replacing=state._replacing&&state.active.includes(state._replacing)?state._replacing:'';
@@ -513,15 +576,29 @@ function renderRosterDetail(){
 }
 function renderAssignments(){
   const pending=ACTIVE.filter(v=>!state.assignments.some(a=>a.villager===v.name)).map(v=>v.name);
-  detail.innerHTML=`<div class="title" style="font-size:1.25rem">Assignments</div><div class="sub">Active villagers still needing a gift today: ${pending.map(esc).join(', ')||'None'}.</div><div class="list">${state.assignments.map((a,i)=>`<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(a.villager)}</div><div class="sub">${esc(a.gift)||'No gift picked yet'}</div></div><button class="smallbtn" data-remove="${i}">Delete</button></div></div>`).join('')||'<div class="rowbox"><div class="sub">No assignments yet for today.</div></div>'}</div>`;
+  const confirmingReset=!!state._confirmReset;
+  detail.innerHTML=`<div class="title" style="font-size:1.25rem">Assignments</div><div class="sub">Active villagers still needing a gift this cycle: ${pending.map(esc).join(', ')||'None'}.</div><div class="actionrow" style="margin-top:10px">${confirmingReset?`<span class="inline-warn" style="margin-top:0">Clear all current assignments and start a new cycle? Your gift history is kept. <button class="smallbtn" id="confirmReset">Yes, start new cycle</button> <button class="smallbtn" id="cancelReset">Cancel</button></span>`:`<button class="smallbtn" id="startResetCycle">🔄 Start new cycle</button>`}</div><div class="list" style="margin-top:12px">${state.assignments.map((a,i)=>`<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(a.villager)} ${a.gifted?'<span class="chip home">✔ Gifted</span>':''}</div><div class="sub">${esc(a.gift)||'No gift picked yet'}</div></div><div class="rowbtns"><button class="smallbtn" data-toggle-gifted="${i}">${a.gifted?'Undo gifted':'🎁 Mark as gifted'}</button><button class="smallbtn" data-remove="${i}">Delete</button></div></div></div>`).join('')||'<div class="rowbox"><div class="sub">No assignments yet this cycle.</div></div>'}</div>`;
   detail.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>{mutate(()=>{state.assignments.splice(Number(b.dataset.remove),1);});});
+  detail.querySelectorAll('[data-toggle-gifted]').forEach(b=>b.onclick=()=>toggleGifted(Number(b.dataset.toggleGifted)));
+  const startBtn=$('#startResetCycle'); if(startBtn) startBtn.onclick=()=>{state._confirmReset=true;render();};
+  const confirmBtn=$('#confirmReset'); if(confirmBtn) confirmBtn.onclick=()=>{state._confirmReset=false;resetCycle();};
+  const cancelBtn=$('#cancelReset'); if(cancelBtn) cancelBtn.onclick=()=>{state._confirmReset=false;render();};
+}
+function renderHistory(){
+  const confirmingClear=!!state._confirmClearHistory;
+  const entries=[...state.history].sort((a,b)=>b.giftedAt-a.giftedAt);
+  const fmt=ts=>{try{return new Date(ts).toLocaleString();}catch(e){return '';}};
+  detail.innerHTML=`<div class="title" style="font-size:1.25rem">Gift history</div><div class="sub">A permanent log of every gift marked as given — this survives "Start new cycle". ${entries.length} entr${entries.length===1?'y':'ies'} total.</div><div class="actionrow" style="margin-top:10px">${entries.length?(confirmingClear?`<span class="inline-warn" style="margin-top:0">Clear the entire gift history? This can't be undone. <button class="smallbtn" id="confirmClearHistory">Yes, clear history</button> <button class="smallbtn" id="cancelClearHistory">Cancel</button></span>`:`<button class="smallbtn" id="startClearHistory">🗑 Clear history</button>`):''}</div><div class="list" style="margin-top:12px">${entries.map(h=>`<div class="rowbox"><div class="checkrow"><div><div class="title">${esc(h.villager)}</div><div class="sub">${esc(h.gift)||'(no item noted)'}</div></div><div class="sub">${esc(fmt(h.giftedAt))}</div></div></div>`).join('')||'<div class="rowbox"><div class="sub">Nothing gifted yet. Mark assignments as gifted in the Assignments tab to build your history.</div></div>'}</div>`;
+  const startBtn=$('#startClearHistory'); if(startBtn) startBtn.onclick=()=>{state._confirmClearHistory=true;render();};
+  const confirmBtn=$('#confirmClearHistory'); if(confirmBtn) confirmBtn.onclick=()=>{state._confirmClearHistory=false;clearHistory();};
+  const cancelBtn=$('#cancelClearHistory'); if(cancelBtn) cancelBtn.onclick=()=>{state._confirmClearHistory=false;render();};
 }
 function renderBackup(){
   detail.innerHTML=`<div class="title" style="font-size:1.25rem">Backup &amp; restore</div>`+
     `<div class="sub">Your changes are saved automatically in this page's <strong>URL</strong> and survive refreshes. Bookmark the current URL, or export a backup file before opening the tracker on another device (URLs don't transfer between devices automatically).</div>`+
     `<div class="actionrow" style="margin-top:14px"><button class="smallbtn" id="btnExport">⬇ Export tracker data (JSON)</button><label class="smallbtn" style="cursor:pointer">⬆ Import tracker data (JSON)<input type="file" id="fileImport" accept="application/json,.json" style="display:none"></label><button class="smallbtn" id="btnCopyUrl">🔗 Copy current URL</button></div>`+
     `<div id="backupMsg"></div>`+
-    `<div class="sub" style="margin-top:14px">The export contains your active roster, each villager's photo status, and your assignments — nothing else. Imported files are validated and treated strictly as data (never executed).</div>`;
+    `<div class="sub" style="margin-top:14px">The export contains your active roster, each villager's photo status, your current assignments, and your full gift history — nothing else. Imported files are validated and treated strictly as data (never executed).</div>`;
   $('#btnExport').onclick=exportData;
   $('#btnCopyUrl').onclick=async()=>{const msg=$('#backupMsg');try{await navigator.clipboard.writeText(location.href);msg.innerHTML='<div class="inline-ok">URL copied to clipboard.</div>';}catch(e){msg.innerHTML='<div class="inline-ok">Copy the address bar URL to save your state.</div>';}};
   $('#fileImport').onchange=e=>importData(e.target.files&&e.target.files[0]);
@@ -531,13 +608,15 @@ function render(){
   villagerControls.style.display=state.mode==='villagers'?'grid':'none';
   itemControls.style.display=state.mode==='items'?'grid':'none';
   rosterControls.style.display=state.mode==='roster'?'grid':'none';
-  villagerGrid.style.display=(state.mode==='assignments'||state.mode==='backup')?'none':'grid';
+  const hideGrid=state.mode==='assignments'||state.mode==='history'||state.mode==='backup';
+  villagerGrid.style.display=hideGrid?'none':'grid';
   renderStatusbar();
-  if(state.mode!=='assignments'&&state.mode!=='backup') renderGrid();
+  if(!hideGrid) renderGrid();
   if(state.mode==='villagers') renderVillagerDetail();
   else if(state.mode==='items') renderItemDetail();
   else if(state.mode==='roster') renderRosterDetail();
   else if(state.mode==='assignments') renderAssignments();
+  else if(state.mode==='history') renderHistory();
   else if(state.mode==='backup') renderBackup();
 }
 
@@ -548,7 +627,8 @@ function exportData(){
   const payload={app:'acnh-gift-tracker',version:STATE_VERSION,exportedAt:new Date().toISOString(),
     active:state.active.slice(),
     photo:Object.fromEntries(state.active.map(n=>[n,!!state.photo[n]])),
-    assignments:state.assignments.map(a=>({villager:a.villager,gift:a.gift||''}))};
+    assignments:state.assignments.map(a=>({villager:a.villager,gift:a.gift||'',gifted:!!a.gifted,giftedAt:a.giftedAt||0})),
+    history:state.history.map(h=>({id:h.id,villager:h.villager,gift:h.gift||'',giftedAt:h.giftedAt}))};
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -567,12 +647,13 @@ function importData(file){
       // adapt export shape into the URL payload shape, then validate
       const adapted={v:obj.version, a:Array.isArray(obj.active)?obj.active:[],
         p:obj.photo&&typeof obj.photo==='object'?Object.keys(obj.photo).filter(k=>obj.photo[k]):[],
-        g:Array.isArray(obj.assignments)?obj.assignments.map(a=>[a&&a.villager,a&&a.gift]):[],
+        g:Array.isArray(obj.assignments)?obj.assignments.map(a=>[a&&a.villager,a&&a.gift,a&&a.gifted?1:0,(a&&a.giftedAt)||0]):[],
+        h:Array.isArray(obj.history)?obj.history.map(x=>[x&&x.id,x&&x.villager,x&&x.gift,(x&&x.giftedAt)||0]):[],
         m:'villagers'};
       const vp=validatePayload(adapted);
       state.active=vp.active;
       const photo={}; vp.active.forEach(n=>photo[n]=!!vp.photo[n]); state.photo=photo;
-      state.assignments=vp.assignments; state.selected=state.active[0]||''; state.mode='villagers';
+      state.assignments=vp.assignments; state.history=vp.history; state.selected=state.active[0]||''; state.mode='villagers';
       loadWarning=vp.warnings.join(' ');
       rebuildActive(); persist(); render();
       const m2=$('#backupMsg'); if(m2) m2.innerHTML='<div class="inline-ok">Backup imported and applied. State saved to the URL.</div>';
@@ -593,6 +674,7 @@ itemSearch.addEventListener('input',e=>{state.iq=e.target.value;state.selectedIt
 rosterSearch.addEventListener('input',e=>{state.rq=e.target.value;const vals=CATALOG_NAMES.filter(n=>matches(n,state.rq)).slice(0,15);sugg(rosterSuggest,vals,v=>{state.rq=v;rosterSearch.value=v;closeSuggests();render();});if(state.mode==='roster') renderRosterDetail();});
 variantSelect.addEventListener('change',e=>{state.selectedVariantKey=e.target.value;renderItemDetail();});
 allVillagersToggle.addEventListener('change',e=>{state.allVillagers=e.target.checked;if(state.mode==='items')renderItemDetail();});
+showAssignedToggle.addEventListener('change',e=>{state.showAssigned=e.target.checked;if(state.mode==='items')renderItemDetail();});
 document.addEventListener('click',e=>{if(!e.target.closest('.suggest-wrap')) closeSuggests();});
 tabs.forEach(t=>t.onclick=()=>{state.mode=t.dataset.mode;state._replacing='';closeSuggests();persist();render();});
 
