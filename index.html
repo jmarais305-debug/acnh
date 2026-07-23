@@ -68,6 +68,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .layout{display:grid;grid-template-columns:340px 1fr;gap:16px;align-items:start}
 .layout.wide{grid-template-columns:1fr}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px;min-height:70vh;box-shadow:var(--shadow)}
+.panel.compact{min-height:auto}
 .controls{display:grid;gap:12px}
 .field-label{font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:6px}
 input,select,textarea{width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);color:var(--text)}
@@ -815,12 +816,14 @@ function render(){
   villagerControls.style.display=state.mode==='villagers'?'grid':'none';
   itemControls.style.display=state.mode==='items'?'grid':'none';
   rosterControls.style.display=state.mode==='roster'?'grid':'none';
-  const hideGrid=state.mode==='assignments'||state.mode==='history'||state.mode==='backup';
-  villagerGrid.style.display=hideGrid?'none':'grid';
-  asideRoot.style.display=hideGrid?'none':'block';
-  layoutRoot.classList.toggle('wide',hideGrid);
+  const showAside=state.mode!=='assignments'&&state.mode!=='history'&&state.mode!=='backup';
+  const showVillagerGrid=state.mode==='villagers'||state.mode==='roster';
+  asideRoot.style.display=showAside?'block':'none';
+  layoutRoot.classList.toggle('wide',!showAside);
+  villagerGrid.style.display=showVillagerGrid?'grid':'none';
+  asideRoot.classList.toggle('compact',showAside&&!showVillagerGrid);
   renderStatusbar();
-  if(!hideGrid) renderGrid();
+  if(showVillagerGrid) renderGrid();
   if(state.mode==='villagers') renderVillagerDetail();
   else if(state.mode==='items') renderItemDetail();
   else if(state.mode==='roster') renderRosterDetail();
