@@ -204,13 +204,18 @@ input::placeholder{color:var(--muted)}
      enforce the ACNH cap of 10 (fewer is allowed).
    * Editable photo status per active villager; retained when a villager
      leaves and rejoins in the same session.
-   * Refresh-safe state WITHOUT web storage: the mutable state (active
-     roster ids, photo statuses, assignments, selection) is serialised into
-     a compact, versioned URL hash (#s=...) via history.replaceState after
-     every mutation, and restored+validated on load. Malformed/old payloads
-     fail safely to defaults with an inline warning.
-   * Export / Import JSON backup. Import validates schema, updates URL state,
-     never executes imported content.
+   * Refresh-safe state via this browser's localStorage: the mutable state
+     (active roster ids, photo statuses, assignments, history, selection) is
+     serialised into a versioned JSON blob and saved after every mutation,
+     then restored+validated on load. Malformed/old payloads fail safely to
+     defaults with an inline warning. (Not the URL: this app is often opened
+     inside a wrapper page — e.g. a Claude Artifact preview — whose address
+     bar doesn't reflect this page's own URL, so URL-hash state would
+     silently vanish between visits. localStorage is scoped to this page's
+     own origin instead.)
+   * Export / Import JSON backup. Import validates schema, updates saved
+     state, never executes imported content. Use this to move data between
+     browsers/devices, since localStorage never leaves this one.
 
    Scoring (unchanged from v13) — three equally-weighted dimensions, each
    max 3: colour (matches/2*3), style (matches/2*3; furniture = N/A -> 0),
@@ -410,10 +415,12 @@ function defaultState(){
 }
 
 /* =====================================================================
-   URL-HASH PERSISTENCE  (refresh-safe, no web storage)
-   Compact payload:  { v, a:[names], p:[names-with-photo], g:[[villager,gift],...], m }
-   Only active-roster photo flags and assignments are stored (compact).
+   LOCAL-STORAGE PERSISTENCE
+   Payload:  { v, a:[names], p:[names-with-photo], g:[[villager,gift,gifted,giftedAt],...], h:[[id,villager,gift,giftedAt],...], m }
+   Saved to this browser's localStorage under STORAGE_KEY after every
+   mutation. Deliberately NOT the URL: see the file-header note above.
    ===================================================================== */
+const STORAGE_KEY='acnhGiftTracker.state';
 function serializeState(){
   const payload={
     v:STATE_VERSION,
@@ -425,16 +432,9 @@ function serializeState(){
   };
   return payload;
 }
-function encodeState(){
-  try{
-    const json=JSON.stringify(serializeState());
-    return 's='+encodeURIComponent(json);
-  }catch(e){ return ''; }
-}
-function writeUrl(){
-  const enc=encodeState();
-  const url=location.pathname+location.search+(enc?('#'+enc):'');
-  try{ history.replaceState(null,'',url); }catch(e){/* ignore */}
+function saveToStorage(){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeState())); }
+  catch(e){ /* storage unavailable or full: state stays in-memory for this session */ }
 }
 // strict, allowlist validation of a decoded payload
 function validatePayload(obj){
@@ -477,13 +477,13 @@ function validatePayload(obj){
   return {active,photo,assignments,history,mode,warnings};
 }
 let loadWarning='';
-function loadFromUrl(){
+function loadState(){
   const d=defaultState();
   state.active=d.active; state.photo=d.photo; state.assignments=[]; state.history=[]; state.mode='villagers';
-  const h=location.hash.replace(/^#/,'');
-  if(!h.startsWith('s=')) return;             // no saved state -> defaults (nine)
+  let raw=null;
+  try{ raw=localStorage.getItem(STORAGE_KEY); }catch(e){ raw=null; }
+  if(!raw) return;                            // nothing saved yet -> defaults (the original nine)
   try{
-    const raw=decodeURIComponent(h.slice(2));
     const obj=JSON.parse(raw);                // JSON.parse only -> never executes content
     const vp=validatePayload(obj);
     state.active=vp.active;
@@ -501,13 +501,13 @@ function loadFromUrl(){
     state.mode=vp.mode;
     if(vp.warnings.length) loadWarning=vp.warnings.join(' ');
   }catch(e){
-    loadWarning='Saved state in the link could not be read, so the default island roster was loaded. Your data was not changed.';
+    loadWarning='Saved data in this browser could not be read, so the default island roster was loaded. Nothing was overwritten.';
     const d2=defaultState(); state.active=d2.active; state.photo=d2.photo; state.assignments=[]; state.history=[]; state.mode='villagers';
   }
 }
 
 /* ---- called after any mutation --------------------------------------- */
-function persist(){ writeUrl(); }
+function persist(){ saveToStorage(); }
 function mutate(fn){ fn(); rebuildActive(); persist(); render(); }
 
 /* =====================================================================
@@ -630,7 +630,7 @@ function renderStatusbar(){
   statusbar.innerHTML=`<span class="stat">Roster <strong class="${full?'stat-warn':''}">${n}/${MAX_ROSTER}</strong></span>`+
     `<span class="stat">Photos <strong>${photoCount}/${n}</strong></span>`+
     `<span class="stat">This cycle <strong>${giftedCount}/${state.assignments.length}</strong> gifted</span>`+
-    `<span class="stat">💾 saved in this page's URL</span>`+
+    `<span class="stat">💾 saved in this browser</span>`+
     (loadWarning?`<span class="stat stat-warn">⚠ ${esc(loadWarning)}</span>`:'');
 }
 function villagerRows(v){
@@ -796,12 +796,11 @@ function renderHistory(){
 }
 function renderBackup(){
   detail.innerHTML=`<div class="section-title">Backup &amp; restore</div>`+
-    `<div class="section-sub">Your changes are saved automatically in this page's <strong>URL</strong> and survive refreshes. Bookmark the current URL, or export a backup file before opening the tracker on another device (URLs don't transfer between devices automatically).</div>`+
-    `<div class="actionrow" style="margin-top:14px"><button class="smallbtn primary" id="btnExport">⬇ Export tracker data (JSON)</button><label class="smallbtn" style="cursor:pointer">⬆ Import tracker data (JSON)<input type="file" id="fileImport" accept="application/json,.json" style="display:none"></label><button class="smallbtn" id="btnCopyUrl">🔗 Copy current URL</button></div>`+
+    `<div class="section-sub">Your changes save automatically to <strong>this browser</strong> and survive refreshes. That storage is tied to this one browser on this one device though — it won't follow you to a different phone, browser, or a private/incognito window, and clearing site data would erase it. Export a backup file regularly, and especially before switching devices.</div>`+
+    `<div class="actionrow" style="margin-top:14px"><button class="smallbtn primary" id="btnExport">⬇ Export tracker data (JSON)</button><label class="smallbtn" style="cursor:pointer">⬆ Import tracker data (JSON)<input type="file" id="fileImport" accept="application/json,.json" style="display:none"></label></div>`+
     `<div id="backupMsg"></div>`+
     `<div class="section-sub" style="margin-top:14px">The export contains your active roster, each villager's photo status, your current assignments, and your full gift history — nothing else. Imported files are validated and treated strictly as data (never executed).</div>`;
   $('#btnExport').onclick=exportData;
-  $('#btnCopyUrl').onclick=async()=>{const msg=$('#backupMsg');try{await navigator.clipboard.writeText(location.href);msg.innerHTML='<div class="inline-ok">URL copied to clipboard.</div>';}catch(e){msg.innerHTML='<div class="inline-ok">Copy the address bar URL to save your state.</div>';}};
   $('#fileImport').onchange=e=>importData(e.target.files&&e.target.files[0]);
 }
 function render(){
@@ -892,10 +891,9 @@ tabs.forEach(t=>t.onclick=()=>{state.mode=t.dataset.mode;state._replacing='';clo
 
 /* ---- boot ------------------------------------------------------------ */
 decorateGifts();
-loadFromUrl();                 // restore from URL (or defaults)
+loadState();                   // restore from this browser's storage (or defaults)
 state.selected=state.active[0]||'';
 rebuildActive();
-writeUrl();                    // normalise URL to canonical serialised form
 render();
 </script>
 </body>
