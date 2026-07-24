@@ -54,6 +54,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .howscoring summary::before{content:'▸ '}
 .howscoring[open] summary::before{content:'▾ '}
 .howscoring div{margin-top:8px;font-size:.85rem;color:var(--muted);max-width:80ch;line-height:1.6}
+.storage-alert{margin-top:14px;padding:12px 16px;border-radius:var(--radius-md);background:var(--warn-bg);color:var(--warn);font-weight:700;font-size:.88rem;line-height:1.5}
 .statusbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
 .stat{background:var(--surface2);border:1px solid var(--line);border-radius:var(--radius-md);padding:7px 13px;font-size:.8rem;color:var(--muted);display:inline-flex;align-items:baseline;gap:5px}
 .stat strong{font-variant-numeric:tabular-nums;font-size:.92rem;font-weight:800;color:var(--text)}
@@ -160,6 +161,7 @@ input::placeholder{color:var(--muted)}
       <summary>How scoring works</summary>
       <div>Every gift is scored on three equally-weighted dimensions — matched <strong>colour</strong>, matched <strong>style</strong>, and <strong>value over 750&nbsp;bells</strong> — each worth up to 3 points, plus a modest <strong>+1</strong> bonus when the item is already in that villager's default home. Clothing uses the workbook's style data; furniture styles are inferred conservatively, only when the item name carries an explicit style word (e.g. <em>cute vanity</em>, <em>elegant dresser</em>) — items with no defensible style stay <strong>N/A</strong>, never guessed. Villagers who still need their photo only see gifts over 750 bells, since that's what triggers the visit needed to get it.</div>
     </details>
+    <div id="storageAlert"></div>
     <div id="statusbar" class="statusbar"></div>
   </header>
   <nav class="navbar">
@@ -421,6 +423,27 @@ function defaultState(){
    mutation. Deliberately NOT the URL: see the file-header note above.
    ===================================================================== */
 const STORAGE_KEY='acnhGiftTracker.state';
+/* ---- storage health -----------------------------------------------------
+   Some embedded/sandboxed viewers (e.g. third-party iframe storage
+   restrictions some browsers apply to embedded previews) silently no-op
+   or throw on localStorage without the app ever finding out — that's how
+   "my changes didn't save" surfaces hours later with no warning at all.
+   Round-trip a probe value on boot and after every save so a real failure
+   shows up immediately instead of being discovered the next visit. */
+let storageOk=true;
+function testStorage(){
+  try{
+    const probeKey='__acnhStorageProbe__', probeVal=String(Date.now());
+    localStorage.setItem(probeKey, probeVal);
+    const ok=localStorage.getItem(probeKey)===probeVal;
+    localStorage.removeItem(probeKey);
+    return ok;
+  }catch(e){ return false; }
+}
+function renderStorageAlert(){
+  const el=$('#storageAlert'); if(!el) return;
+  el.innerHTML=storageOk?'':`<div class="storage-alert">⚠ This browser isn't saving your changes right now — anything you do here will be gone next time you open this page. Export a backup (Backup tab) before you close this tab, and see if opening this tracker as a plain webpage link (rather than an embedded preview) fixes saving.</div>`;
+}
 function serializeState(){
   const payload={
     v:STATE_VERSION,
@@ -433,8 +456,12 @@ function serializeState(){
   return payload;
 }
 function saveToStorage(){
-  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeState())); }
-  catch(e){ /* storage unavailable or full: state stays in-memory for this session */ }
+  const payload=JSON.stringify(serializeState());
+  try{
+    localStorage.setItem(STORAGE_KEY, payload);
+    storageOk=localStorage.getItem(STORAGE_KEY)===payload;      // verify the write actually stuck
+  }catch(e){ storageOk=false; }
+  renderStorageAlert();
 }
 // strict, allowlist validation of a decoded payload
 function validatePayload(obj){
@@ -891,9 +918,11 @@ tabs.forEach(t=>t.onclick=()=>{state.mode=t.dataset.mode;state._replacing='';clo
 
 /* ---- boot ------------------------------------------------------------ */
 decorateGifts();
+storageOk=testStorage();       // check BEFORE loadState so a silent-fail environment is caught even on a first-ever visit
 loadState();                   // restore from this browser's storage (or defaults)
 state.selected=state.active[0]||'';
 rebuildActive();
+renderStorageAlert();
 render();
 </script>
 </body>
